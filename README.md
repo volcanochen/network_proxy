@@ -23,10 +23,10 @@ cd C:\VOLCANO\myws\bs001
 
 会话运行期间，服务器本机有两个代理入口（Windows 端 stop 后都会失效）：
 
-| 入口 | 地址（服务器侧） | 适用 |
-|---|---|---|
-| SOCKS5 | `127.0.0.1:10800`（默认，`-SocksPort` 可调） | curl 的 `--socks5h` / `all_proxy=socks5h://`、Chromium 系浏览器、支持 SOCKS 的程序 |
-| HTTP | `127.0.0.1:10808`（默认，`-RelayPort` 可调） | apt、GNOME 系统代理、只认 HTTP 代理的程序（llmster 也是） |
+| 入口   | 地址（服务器侧）                                 | 适用                                                                                |
+| ------ | ------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| SOCKS5 | `127.0.0.1:10800`（默认，`-SocksPort` 可调） | curl 的`--socks5h` / `all_proxy=socks5h://`、Chromium 系浏览器、支持 SOCKS 的程 |
+| HTTP   | `127.0.0.1:10808`（默认，`-RelayPort` 可调） | apt、GNOME 系统代理、只认 HTTP 代理的程序（llmster 也是）                           |
 
 **注意**：HTTP 中继（10808）跑在服务器上；Windows 本机的浏览器要用代理，指向的是本机 SOCKS 口 `127.0.0.1:10800`。
 
@@ -99,20 +99,35 @@ lms server stop     # 下载中止，已传部分保留为 .part 断点
 lms server start    # 之后重新 lms get 即续传（不影响代理隧道本身）
 ```
 
+## 附录：同一 Ubuntu 服务器上跑着 RDP（xrdp）时的注意事项
+
+buildserver 装有 xrdp + Xfce 供 RDP 使用。它与本工具的隧道互不影响，但**与物理控制台的 GNOME/Wayland 会话互相冲突**（故障已于 2026-10-12 修复）：
+
+- 症状：RDP 登录后闪退，或只剩一张背景、没有面板和图标。
+- 原因：物理控制台登录 GNOME 时，会把 `WAYLAND_DISPLAY`、`XAUTHORITY` 注入**该用户的 systemd 用户级环境**；同一用户再开 RDP(Xorg) 会话，Xfce 组件经 D-Bus 激活时继承这些污染值，打不开显示。判据是 `~/.xsession-errors` 里的 `cannot open display: wayland-0`。
+- 修复（已完成）：① `~/.xsession` 换为加固版——先 `unset WAYLAND_DISPLAY / GNOME_SETUP_DISPLAY`，再用 `dbus-update-activation-environment` 把正确的 DISPLAY/XAUTHORITY 推回会话总线（原文件备份 `~/.xsession.bak.20261012`）；② 注销了当时的物理控制台 GNOME 会话（`loginctl terminate-session`）。GDM 配置里未开启自动登录，控制台此后停在登录页。
+- 使用建议：**RDP 期间不要在物理控制台登录同一用户**。若又出现同类症状，在服务器执行下面命令后重连即可：
+
+```bash
+systemctl --user unset-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY GNOME_SETUP_DISPLAY
+```
+
+（另有一次相关故障：装 nginx 后启用 ufw 只放行了 80，导致 22 端口被静默丢弃、SSH 超时；xrdp 也因其运行用户不在 ssl-cert 组而读不到 TLS 私钥。两者分别用 `ufw allow 22/tcp`、`adduser xrdp ssl-cert` 解决。）
+
 ## 与 tun_vpn（原仓库方案）的区别
 
 原 https://github.com/volcanochen/tun_vpn 方案的本质是**网络层透明代理**：在服务器用 root 创建内核 TUN 设备 `tun0`，把默认路由指过去，让**所有应用的流量**无感进入它，再由 `tun2socks` 把 IP 包转成 SOCKS 连接、经 SSH 隧道送到 Windows 出网；系统 DNS 用 UDP→TCP DNS 桥 + 改写 `/etc/resolv.conf` 解决。整体效果相当于"服务器凭空多了一张网卡"。
 
 本方案只保留了原仓库的**出网半段**（Windows SOCKS5 代理 + SSH 反向隧道，`socks_proxy.py` 原样使用），服务器端把 TUN 网关那套换成了应用层代理配置：
 
-| 维度 | tun_vpn 原方案 | network_proxy 本方案 |
-|---|---|---|
-| 联网方式 | 透明：全部应用自动联网 | 显式：每个应用各自配代理（守护进程 env / Edge 系统代理 / apt -o） |
-| 权限 | 需要 sudo（建 TUN、改路由、改 resolv.conf） | 零 root |
-| DNS | 系统级可用（nslookup / getent 正常） | 仅走代理的应用由代理端解析；系统级解析仍不可用 |
-| 覆盖范围 | 任意程序（含不支持代理的） | 仅支持 HTTP/SOCKS 代理的程序 |
-| 服务器端组件 | tun2socks + DNS 桥 + tun_gateway.sh | http_relay.py 一层（llmster 的 Node 只认 HTTP 代理，故加此层） |
-| 停止与残留 | 须 root 拆 tun0、还原路由与 resolv.conf | stop 只重启守护进程；唯一持久项是 apt conf 需手删 |
+| 维度         | tun_vpn 原方案                              | network_proxy 本方案                                              |
+| ------------ | ------------------------------------------- | ----------------------------------------------------------------- |
+| 联网方式     | 透明：全部应用自动联网                      | 显式：每个应用各自配代理（守护进程 env / Edge 系统代理 / apt -o） |
+| 权限         | 需要 sudo（建 TUN、改路由、改 resolv.conf） | 零 root                                                           |
+| DNS          | 系统级可用（nslookup / getent 正常）        | 仅走代理的应用由代理端解析；系统级解析仍不可用                    |
+| 覆盖范围     | 任意程序（含不支持代理的）                  | 仅支持 HTTP/SOCKS 代理的程序                                      |
+| 服务器端组件 | tun2socks + DNS 桥 + tun_gateway.sh         | http_relay.py 一层（llmster 的 Node 只认 HTTP 代理，故加此层）    |
+| 停止与残留   | 须 root 拆 tun0、还原路由与 resolv.conf     | stop 只重启守护进程；唯一持久项是 apt conf 需手删                 |
 
 **为什么换**：这台服务器的 `sudo` 需要交互密码，一键脚本拿不到 root，TUN 方案的第一步 `sudo tun_gateway.sh start` 无法自动化；而实际需要联网的 LM Studio、apt、Edge 三者都支持显式代理，应用层方案已经够用。
 
@@ -120,14 +135,14 @@ lms server start    # 之后重新 lms get 即续传（不影响代理隧道本�
 
 ## 文件清单
 
-| 文件 | 运行位置 | 作用 |
-|---|---|---|
-| `network_proxy.ps1` | Windows | 主控脚本（start / stop / status / help；`-LmStudio` `-Model` 可选） |
-| `socks_proxy.py` | Windows | SOCKS5 代理（真正出网的一环；已修复 IPv6 目标连接） |
-| `http_relay.py` | 服务器 /tmp | HTTP 代理 → SOCKS5 的转发中继（通用组件） |
-| `network_proxy_on_start.sh` | 服务器 /tmp | 部署中继、验证；`LMP_LMSTUDIO=1` 时配置守护进程并代跑下载 |
-| `network_proxy_on_stop.sh` | 服务器 /tmp | 清理中继；`LMP_LMSTUDIO=1` 时把守护进程恢复为无代理常态 |
-| `proxy.pac` | Windows | 浏览器 PAC 自动代理脚本（可选） |
+| 文件                          | 运行位置    | 作用                                                                    |
+| ----------------------------- | ----------- | ----------------------------------------------------------------------- |
+| `network_proxy.ps1`         | Windows     | 主控脚本（start / stop / status / help；`-LmStudio` `-Model` 可选） |
+| `socks_proxy.py`            | Windows     | SOCKS5 代理（真正出网的一环；已修复 IPv6 目标连接）                     |
+| `http_relay.py`             | 服务器 /tmp | HTTP 代理 → SOCKS5 的转发中继（通用组件）                              |
+| `network_proxy_on_start.sh` | 服务器 /tmp | 部署中继、验证；`LMP_LMSTUDIO=1` 时配置守护进程并代跑下载             |
+| `network_proxy_on_stop.sh`  | 服务器 /tmp | 清理中继；`LMP_LMSTUDIO=1` 时把守护进程恢复为无代理常态               |
+| `proxy.pac`                 | Windows     | 浏览器 PAC 自动代理脚本（可选）                                         |
 
 ## 工作原理
 
@@ -153,15 +168,15 @@ lms server start    # 之后重新 lms get 即续传（不影响代理隧道本�
 
 ## 故障排查
 
-| 现象 | 处理 |
-|---|---|
-| 无法连接服务器（主机不可达或 SSH 服务未运行） | 确认服务器开机、ping 可达、SSH 服务在跑、免密可用；脚本会快速失败并自动回收本机进程 |
-| 隧道建立失败（探测超时） | 多为上次残留隧道占服务器端口。先 `stop`；stop 不掉时换 `-SocksPort 10801 -RelayPort 10809` |
-| `start` 报已有会话运行 | 先 `stop` 再 `start` |
-| status 链路检测非 200 | 本机休眠/断网导致隧道断，`stop` 后重新 `start` |
-| lms get 报 Network connection failed | 守护进程重启过但没带代理——重新 `start -LmStudio` 即可 |
-| 浏览器设了代理打不开网页 | ① 类型/端口对应：SOCKS 选 10800，GNOME 系统代理用 10808（SOCKS 会因本机无 DNS 报 ERR_NAME_NOT_RESOLVED）；② 旧代理进程需重启会话加载修复；③ `ping` 不通属正常，用网页验证 |
-| 下载速度 | 实测 0.5~1.3 MB/s（经本机转发+SSH 加密），6.5GB 模型约 1.5~3 小时 |
+| 现象                                          | 处理                                                                                                                                                                          |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 无法连接服务器（主机不可达或 SSH 服务未运行） | 确认服务器开机、ping 可达、SSH 服务在跑、免密可用；脚本会快速失败并自动回收本机进程                                                                                           |
+| 隧道建立失败（探测超时）                      | 多为上次残留隧道占服务器端口。先`stop`；stop 不掉时换 `-SocksPort 10801 -RelayPort 10809`                                                                                 |
+| `start` 报已有会话运行                      | 先`stop` 再 `start`                                                                                                                                                       |
+| status 链路检测非 200                         | 本机休眠/断网导致隧道断，`stop` 后重新 `start`                                                                                                                            |
+| lms get 报 Network connection failed          | 守护进程重启过但没带代理——重新`start -LmStudio` 即可                                                                                                                      |
+| 浏览器设了代理打不开网页                      | ① 类型/端口对应：SOCKS 选 10800，GNOME 系统代理用 10808（SOCKS 会因本机无 DNS 报 ERR_NAME_NOT_RESOLVED）；② 旧代理进程需重启会话加载修复；③`ping` 不通属正常，用网页验证 |
+| 下载速度                                      | 实测 0.5~1.3 MB/s（经本机转发+SSH 加密），6.5GB 模型约 1.5~3 小时                                                                                                            |
 
 ## 限制
 
